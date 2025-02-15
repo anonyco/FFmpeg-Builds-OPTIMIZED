@@ -27,20 +27,38 @@ GIT_BRANCH="${GIT_BRANCH_OVERRIDE:-$GIT_BRANCH}"
 BUILD_SCRIPT="$(mktemp)"
 trap "rm -f -- '$BUILD_SCRIPT'" EXIT
 
-cat <<EOF >"$BUILD_SCRIPT"
+cat <<'EOF' >"$BUILD_SCRIPT"
     set -xe
+    
+    case "${1:-}" in
+      --bundle=*.zip)
+        zip -9 -r "${1#--bundle=}" "$2"
+        exit $? ;;
+      --bundle=*.tar.xz)
+        tar -cf - "$2" | xz -9zfc -T0 - >"${1#--bundle=}"
+        exit $? ;;
+      --bundle=*)
+        echo "[FATAL] Unknown requested output fname bundle file extension passed to inner docker build script: $1" >&2
+        exit 1 ;;
+    esac
+    
     cd /ffbuild
     rm -rf ffmpeg prefix
 
     git clone --filter=blob:none --branch='$GIT_BRANCH' '$FFMPEG_REPO' ffmpeg
     cd ffmpeg
 
-    ./configure --prefix=/ffbuild/prefix --pkg-config-flags="--static" \$FFBUILD_TARGET_FLAGS \$FF_CONFIGURE \
-        --extra-cflags="\$FF_CFLAGS" --extra-cxxflags="\$FF_CXXFLAGS" --extra-libs="\$FF_LIBS" \
-        --extra-ldflags="\$FF_LDFLAGS" --extra-ldexeflags="\$FF_LDEXEFLAGS" \
-        --cc="\$CC" --cxx="\$CXX" --ar="\$AR" --ranlib="\$RANLIB" --nm="\$NM" \
-        --extra-version="\$(date +%Y%m%d)"
-    make -j\$(nproc) V=1
+    # Modify configure so that unknown flags get silently ignored:
+    sed -e '/    echo "See $0 --help for available options."/ a \    return 0' ./configure >./configure.new
+    chmod +x ./configure.new
+    mv -f ./configure.new ./configure
+
+    ./configure --prefix=/ffbuild/prefix --pkg-config-flags="--static" $FFBUILD_TARGET_FLAGS $FF_CONFIGURE \
+        --extra-cflags="$FF_CFLAGS" --extra-cxxflags="$FF_CXXFLAGS" --extra-libs="$FF_LIBS" \
+        --extra-ldflags="$FF_LDFLAGS" --extra-ldexeflags="$FF_LDEXEFLAGS" \
+        --cc="$CC" --cxx="$CXX" --ar="$AR" --ranlib="$RANLIB" --nm="$NM" \
+        --extra-version="$(date +%Y%m%d)"
+    make -j$(nproc) V=1
     make install install-doc
 EOF
 
@@ -64,15 +82,13 @@ package_variant ffbuild/prefix "ffbuild/pkgroot/$BUILD_NAME"
 
 [[ -n "$LICENSE_FILE" ]] && cp "ffbuild/ffmpeg/$LICENSE_FILE" "ffbuild/pkgroot/$BUILD_NAME/LICENSE.txt"
 
-cd ffbuild/pkgroot
 if [[ "${TARGET}" == win* ]]; then
     OUTPUT_FNAME="${BUILD_NAME}.zip"
-    docker run --rm -i $TTY_ARG "${UIDARGS[@]}" -v "${ARTIFACTS_PATH}":/out -v "${PWD}/${BUILD_NAME}":"/${BUILD_NAME}" -w / "$IMAGE" zip -9 -r "/out/${OUTPUT_FNAME}" "$BUILD_NAME"
 else
     OUTPUT_FNAME="${BUILD_NAME}.tar.xz"
-    docker run --rm -i $TTY_ARG "${UIDARGS[@]}" -v "${ARTIFACTS_PATH}":/out -v "${PWD}/${BUILD_NAME}":"/${BUILD_NAME}" -w / "$IMAGE" tar cJf "/out/${OUTPUT_FNAME}" "$BUILD_NAME"
 fi
-cd -
+
+docker run --rm -i $TTY_ARG "${UIDARGS[@]}" -v "${ARTIFACTS_PATH}":/out -v "$PWD/ffbuild/pkgroot/${BUILD_NAME}":"/${BUILD_NAME}" "$BUILD_SCRIPT":/build.sh -w / "$IMAGE" bash /build.sh --bundle="/out/${OUTPUT_FNAME}" "$BUILD_NAME"
 
 rm -rf ffbuild
 
